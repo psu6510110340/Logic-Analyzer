@@ -1,3 +1,4 @@
+#ใส่ข้อมูลแล้ว plot เลย
 """
 CAN Frame Visualizer – Neo‑Dark UI ✨
 ===================================

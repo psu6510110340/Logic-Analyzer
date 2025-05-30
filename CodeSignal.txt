@@ -1,0 +1,191 @@
+from matplotlib.animation import FuncAnimation
+import serial
+import struct
+import matplotlib.pyplot as plt
+
+PORT = 'COM6'         
+BAUD = 1152000        
+MAX_BITS = 5000
+
+
+state_data = []
+timestamp_data = []
+
+total_time = 0
+current_bit_state_percentage = [0, 0]
+current_bit_index = 0
+bit_data = []
+bit_duration = 20  
+
+done = False
+
+ser = serial.Serial(PORT, BAUD, timeout=1)
+
+def decode_8byte_aligned(data: bytes):
+    global state_data, timestamp_data, total_time, current_bit_state_percentage, current_bit_index, bit_data, bit_duration
+      
+    i = 0
+
+    while i < len(data):
+
+        if data[i:i+3] == b'\x11\x00\x01' or data[i:i+3] == b'\x11\x01\x01':
+            record = data[i:i+8]
+            if len(record) < 8:
+                continue
+
+            state = record[1]
+            if len(state_data) > 1 and state == state_data[-1]:
+                i += 8
+                continue
+
+            timestamp = struct.unpack("<I", record[4:8])[0] 
+           
+            # Debugging output
+            #print(f"{current_bit_index} Rec: {record[0:4]}          {record[4:8]}           Lev: {state}    Dur: {timestamp}")
+            
+            if len(timestamp_data) > 0 and timestamp < timestamp_data[-1]:
+                state_data.clear()
+                timestamp_data.clear()
+                total_time = 0
+                current_bit_state_percentage = [0, 0]
+                current_bit_index = 0
+                bit_data = []
+                print("---------------------------------------------------------------")
+
+            if len(state_data) >= 1:
+                state_data.append(state_data[-1])
+            state_data.append(state)
+
+            if len(timestamp_data) >= 1:
+                timestamp_data.append(timestamp)
+            timestamp_data.append(timestamp)
+
+            if current_bit_index > 40:
+                bit_duration = 20.1
+
+            while current_bit_index * bit_duration <= timestamp:
+                if (current_bit_index + 1) * bit_duration <= timestamp: 
+                    if current_bit_state_percentage != [0,0]:
+                        current_bit_state_percentage[1 - state] = (current_bit_index + 1) * bit_duration - total_time                     
+                        if current_bit_state_percentage[0] > 10:
+                            bit_data.append(0)
+                        elif current_bit_state_percentage[0] == 10:
+                            if len(bit_data) > 4 and sum(bit_data[-5:]) == 0:
+                                bit_data.append(1)
+                            else:
+                                bit_data.append(0)
+                        elif current_bit_state_percentage[1] == 10:
+                            if len(bit_data) > 4 and sum(bit_data[-5:]) == 5:
+                                bit_data.append(0)
+                            else:
+                                bit_data.append(1)
+                        else:
+                            bit_data.append(1)
+                    else:
+                        bit_data.append(1 - state)
+                    current_bit_state_percentage = [0, 0]
+                    current_bit_index += 1
+                else:
+                    current_bit_state_percentage[1 - state] = timestamp - current_bit_index * bit_duration  
+                    break
+
+            total_time = timestamp
+            
+            i += 8
+        else:
+            i += 1
+
+fig, ax = plt.subplots()
+
+def update(frame):
+    global state_data, timestamp_data, bit_data, done
+
+    if done:
+        return
+
+    data = ser.read(120)
+    if data:
+        print(data)
+        ax.clear()
+        
+        frame_labels = {
+            0: "SOF",
+            1: "ID",
+            12: "RTR",
+            13: "IDE",
+            14: "r0",
+            15: "DLC",
+            19: "DATA0",
+            27: "DATA1",
+            35: "DATA2",
+            43: "DATA3",
+            51: "DATA4",
+            59: "DATA5",
+            67: "DATA6",
+            75: "DATA7",
+            83: "CRC",
+            98: "DEL",
+            99: "ACK",
+            100: "DEL",
+            107: "EOF"
+        }
+
+        stuff_bit_count = 0
+        count = 0
+        last_bit = -1
+        actual_idx = 0
+
+        ax.set_ylim(-0.5, 1.5)
+        ax.set_xlim(0, MAX_BITS)
+        ax.set_xlabel('Time (ticks)')
+        ax.set_ylabel('Logic Level')
+        ax.set_title('Live CAN Frame')
+        ax.grid(True)
+
+        decode_8byte_aligned(data)
+
+        x = timestamp_data
+        y = state_data
+
+        if len(x) != 0:
+            ax.step(x, y, where='post', color='blue', linewidth=1.5)
+
+        for i in range(0, MAX_BITS, 20):
+            ax.axvline(i, color='gray', linestyle='--', linewidth=0.5)
+
+        for idx, bit in enumerate(bit_data):
+            x_pos = idx * 20 + 10
+            y_pos = 1.1
+            ax.text(x_pos, y_pos, str(bit), fontsize=9, ha='center', va='center', color='blue')
+            ax.text(x_pos, y_pos + 0.1, str(idx), fontsize=9, ha='center', va='center', color='blue', rotation=90)
+        
+            if bit == last_bit:
+                count += 1
+            else:
+                if count >= 5:
+                    stuff_bit_count += 1
+                    # ax.axvline(x_pos, color='red', linestyle='--', linewidth=1)
+                    ax.text(x_pos, 1.3, "stuff", fontsize=8, ha='center', va='center', color='red', rotation=90)
+                    ax.axvspan(x_pos - 10, x_pos + 10, facecolor='red', alpha=0.1)
+                    count = 0
+                    last_bit = bit
+                    continue
+                count = 1
+
+            if actual_idx in frame_labels:
+                label = frame_labels[actual_idx]
+                x = idx * 20      
+                ax.axvline(x, color='black', linestyle='-', linewidth=1)
+                ax.text(x + 12, -0.4, label, rotation=90, fontsize=8, ha='center', va='bottom', color='black')
+
+            last_bit = bit
+            actual_idx += 1
+        
+ani = FuncAnimation(
+    fig,         
+    update,      
+    interval=100,  
+    blit=False
+)
+
+plt.show()
